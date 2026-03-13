@@ -7,6 +7,13 @@ on:
   issues:
     types: [opened, edited]
 
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Feature issue number to test with"
+        type: number
+        required: true
+
 permissions:
   contents: read
   issues: write
@@ -24,13 +31,25 @@ jobs:
 
     env:
       DEFAULT_REQUIREMENTS_REPO: ${{ vars.DEFAULT_REQUIREMENTS_REPO || 'dmf-mxl/mxl-requirements' }}
-      ISSUE_NUMBER: ${{ github.event.issue.number }}
 
     steps:
+
       ###########################################################################
-      # 0) TOKEN: Use org GitHub App token BEFORE any gh commands
+      # 0. TOKEN INITIALISATION — BEFORE ANY gh COMMANDS
       ###########################################################################
-      - name: Create GitHub App token (org)
+      - name: Determine token mode
+        id: token_mode
+        run: |
+          echo "Event = ${{ github.event_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=dispatch" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=real" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Real (issues) → GitHub App token
+      - name: Create GitHub App token
+        if: ${{ steps.token_mode.outputs.mode == 'real' }}
         id: app_token
         uses: actions/create-github-app-token@v2
         with:
@@ -38,11 +57,20 @@ jobs:
           private-key: ${{ secrets.CROSS_REPO_ISSUE_ACCESS_PRIVATE_KEY }}
           owner: dmf-mxl
 
-      - name: Export GH_TOKEN
+      - name: Export GH_TOKEN (real)
+        if: ${{ steps.token_mode.outputs.mode == 'real' }}
         run: |
           echo "GH_TOKEN=${{ steps.app_token.outputs.token }}" >> "$GITHUB_ENV"
+          echo "Using GitHub App token"
 
-      - name: Verify GH_TOKEN
+      # Test mode → builtin GITHUB_TOKEN
+      - name: Export GH_TOKEN (dispatch)
+        if: ${{ steps.token_mode.outputs.mode == 'dispatch' }}
+        run: |
+          echo "GH_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> "$GITHUB_ENV"
+          echo "Using GITHUB_TOKEN (dispatch mode)"
+
+      - name: Verify GH_TOKEN early
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "ERROR: GH_TOKEN missing"
@@ -50,93 +78,114 @@ jobs:
           fi
           echo "GH_TOKEN OK"
 
+
       ###########################################################################
-      # 1) FETCH ISSUE BODY (as rendered markdown)
+      # 1. FETCH ISSUE BODY — MULTILINE SAFE into $ISSUE_BODY
       ###########################################################################
       - name: Fetch issue body
         id: fetch_body
         run: |
-          BODY=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}" --jq .body || echo "")
+          echo "Fetching issue #${ISSUE_NUMBER}"
+
+          BODY=$(gh api \
+            "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}" \
+            --jq .body || echo "")
+
+          echo "--- RAW ISSUE BODY (truncated to 300 chars) ---"
+          echo "$BODY" | head -c 300
+          echo
+          echo "----------------------------------------------"
+
+          # Export into ISSUE_BODY as a multiline environment variable
           {
             echo "ISSUE_BODY<<EOF"
             echo "$BODY"
             echo "EOF"
           } >> "$GITHUB_ENV"
 
+
       ###########################################################################
-      # 2) EXTRACT requirement_link from the rendered markdown (robust)
-      #    Looks for a line after any heading containing "Requirement Link"
+      # 2. PARSE ISSUE FORM — NOW WITH REAL MARKDOWN
       ###########################################################################
-      - name: Extract requirement_link from body
-        id: extract_raw
+      - name: Parse issue form
+        id: parse
+        uses: cssnr/parse-issue-form-action@v1
+        with:
+          body: ${{ env.ISSUE_BODY }}
+
+      - name: DEBUG — Parsed form fields
         run: |
-          # Remove CRs and non-printables, collapse whitespace
-          CLEAN=$(printf "%s\n" "$ISSUE_BODY" \
-                  | sed 's/\r//g' \
-                  | sed 's/[^[:print:]\t]//g' \
-                  | sed 's/[[:space:]]\+/ /g')
+          echo "requirement_link='${{ steps.parse.outputs.requirement_link }}'"
 
-          # Take the line AFTER a heading containing "Requirement Link" (case/space-insensitive)
-          REQ_LINE=$(printf "%s\n" "$CLEAN" \
-                      | awk 'tolower($0) ~ /requirement[[:space:]]*link/ {getline; print}' \
-                      | xargs)
-
-          echo "requirement_link=$REQ_LINE" >> "$GITHUB_OUTPUT"
 
       ###########################################################################
-      # 3) GUARD
+      # 3. Guard for requirement link
       ###########################################################################
-      - name: Guard requirement_link exists
+      - name: Guard requirement_link
         id: guard
         run: |
-          LINK="${{ steps.extract_raw.outputs.requirement_link }}"
+          LINK="${{ steps.parse.outputs.requirement_link }}"
+          echo "LINK='$LINK'"
           if [ -z "$LINK" ]; then
-            echo "No requirement_link found — skipping run."
-            echo "has=false" >> "$GITHUB_OUTPUT"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "Test mode: continuing"
+              echo "has=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Requirement link missing — skipping"
+              echo "has=false" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "Found requirement_link: '$LINK'"
+            echo "Requirement link OK"
             echo "has=true" >> "$GITHUB_OUTPUT"
           fi
 
+
       ###########################################################################
-      # 4) NORMALIZE requirement_link → owner_repo, issue_num, requirement_url
+      # 4. Normalise requirement link
       ###########################################################################
-      - name: Normalize requirement_link
+      - name: Normalize requirement link
         if: ${{ steps.guard.outputs.has == 'true' }}
         id: normalize
         env:
-          RAW_LINK: ${{ steps.extract_raw.outputs.requirement_link }}
+          RAW_LINK: ${{ steps.parse.outputs.requirement_link }}
           DEFAULT: ${{ env.DEFAULT_REQUIREMENTS_REPO }}
         run: |
           set -euo pipefail
+          echo "Normalising '$RAW_LINK'"
 
-          LINK="$(echo "$RAW_LINK" | xargs)"
+          LINK="$(echo "$RAW_LINK" | tr -d '\r' | xargs)"
           OWNER_REPO=""
           ISSUE_NUM=""
 
           if [[ "$LINK" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+$ ]]; then
             OWNER_REPO="${LINK%%#*}"
             ISSUE_NUM="${LINK##*#}"
+
           elif [[ "$LINK" =~ ^\#?[0-9]+$ ]]; then
             OWNER_REPO="$DEFAULT"
             ISSUE_NUM="${LINK#\#}"
+
           elif [[ "$LINK" =~ ^https?://github\.com/([^/]+)/([^/]+)/issues/([0-9]+) ]]; then
             OWNER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
             ISSUE_NUM="${BASH_REMATCH[3]}"
-          fi
 
-          if [[ -z "$OWNER_REPO" || -z "$ISSUE_NUM" ]]; then
-            echo "Could not normalize requirement_link='$LINK' — skipping."
-            exit 0
           fi
 
           FULL_URL="https://github.com/${OWNER_REPO}/issues/${ISSUE_NUM}"
+
           echo "owner_repo=$OWNER_REPO"     >> "$GITHUB_OUTPUT"
           echo "issue_num=$ISSUE_NUM"      >> "$GITHUB_OUTPUT"
           echo "requirement_url=$FULL_URL" >> "$GITHUB_OUTPUT"
 
+      - name: DEBUG — Normalisation
+        run: |
+          echo "owner_repo=${{ steps.extract.outputs.owner_repo }}"
+          echo "issue_num=${{ steps.extract.outputs.issue_num }}"
+          echo "requirement_url=${{ steps.extract.outputs.requirement_url }}"
+
+
       ###########################################################################
-      # 5) SUB-ISSUE LINK: parent = requirement, child = feature
+      # 5. Parent → child sub‑issue link
       ###########################################################################
       - name: Link as sub-issue
         if: ${{ steps.normalize.outputs.issue_num != '' }}
@@ -147,9 +196,18 @@ jobs:
           CHILD_NUMBER: ${{ env.ISSUE_NUMBER }}
         run: |
           set -euo pipefail
+          echo "Linking child $CHILD_REPO#$CHILD_NUMBER → parent $PARENT_REPO#$PARENT_NUMBER"
 
-          PARENT_NODE=$(gh issue view "https://github.com/$PARENT_REPO/issues/$PARENT_NUMBER" --json id --jq .id)
-          CHILD_NODE=$(gh issue view "https://github.com/$CHILD_REPO/issues/$CHILD_NUMBER" --json id --jq .id)
+          PARENT_NODE=$(gh issue view \
+            "https://github.com/$PARENT_REPO/issues/$PARENT_NUMBER" \
+            --json id --jq .id)
+
+          CHILD_NODE=$(gh issue view \
+            "https://github.com/$CHILD_REPO/issues/$CHILD_NUMBER" \
+            --json id --jq .id)
+
+          echo "PARENT_NODE=$PARENT_NODE"
+          echo "CHILD_NODE=$CHILD_NODE"
 
           gh api graphql \
             -H "GraphQL-Features: sub_issues" \
@@ -166,22 +224,25 @@ jobs:
             "
 
       ###########################################################################
-      # 6) APPEND CLICKABLE URL TO END OF ISSUE BODY (idempotent)
+      # 6. Append clickable requirement URL to issue body
       ###########################################################################
       - name: Append requirement URL to issue body
-        if: ${{ steps.normalize.outputs.issue_num != '' }}
+        if: ${{ steps.extract.outputs.issue_num != '' }}
         env:
           REQUIRE_URL: ${{ steps.normalize.outputs.requirement_url }}
           CHILD_REPO: ${{ github.repository }}
           CHILD_NUMBER: ${{ env.ISSUE_NUMBER }}
         run: |
-          set -euo pipefail
+          echo "Patching body of issue #${CHILD_NUMBER}"
 
-          gh api "repos/$CHILD_REPO/issues/$CHILD_NUMBER" --jq .body > body_current.txt || echo -n > body_current.txt
-          # remove previous block
-          sed -e '/<!--mxl:requirement:start-->/,/<!--mxl:requirement:end-->/d' body_current.txt > body_clean.txt
-          # append new block
-          printf "\n\n<!--mxl:requirement:start-->\n%s\n<!--mxl:requirement:end-->\n" "$REQUIRE_URL" >> body_clean.txt
+          gh api "repos/$CHILD_REPO/issues/$CHILD_NUMBER" --jq .body > body_current.txt
+
+          # Remove any previous marker block
+          sed -e '/<!--mxl:requirement:start-->/,/<!--mxl:requirement:end-->/d' \
+            body_current.txt > body_clean.txt
+
+          printf "\n\n<!--mxl:requirement:start-->\n%s\n<!--mxl:requirement:end-->\n" "$REQUIRE_URL" \
+            >> body_clean.txt
 
           NEW_BODY="$(cat body_clean.txt)"
 
@@ -190,3 +251,16 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "repos/$CHILD_REPO/issues/$CHILD_NUMBER" \
             -f body="$NEW_BODY"
+
+
+      ###########################################################################
+      # 7. Final summary
+      ###########################################################################
+      - name: DEBUG — Final summary
+        run: |
+          echo "Event:             ${{ github.event_name }}"
+          echo "Issue Number:      ${{ env.ISSUE_NUMBER }}"
+          echo "Owner Repo:        ${{ steps.extract.outputs.owner_repo }}"
+          echo "Requirement Issue: ${{ steps.extract.outputs.issue_num }}"
+          echo "URL:               ${{ steps.extract.outputs.requirement_url }}"
+          echo "DONE."
