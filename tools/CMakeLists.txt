@@ -16,7 +16,10 @@ endif()
 
 add_subdirectory(mxl-info)
 add_subdirectory(mxl-data-probe)
-add_subdirectory(mxl-gst)
+option(MXL_BUILD_GST_TOOLS "Build the GStreamer-based tools (mxl-gst-*)" ON)
+if (MXL_BUILD_GST_TOOLS)
+    add_subdirectory(mxl-gst)
+endif ()
 
 if (MXL_ENABLE_FABRICS_OFI)
     add_subdirectory(mxl-fabrics-demo)

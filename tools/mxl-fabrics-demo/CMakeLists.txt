@@ -32,5 +32,6 @@ set_target_properties(mxl-fabrics-demo
 
 # Install targets
 install(TARGETS mxl-fabrics-demo
-        RUNTIME DESTINATION bin
+        COMPONENT ${PROJECT_NAME}-tools
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )

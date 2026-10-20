@@ -426,6 +426,12 @@ if(BUILD_DOCS)
 endif()
 
 # CPack Configuration
+option(MXL_DEB_COMPONENTS
+    "Package as dmfmxl (runtime) + dmfmxl-dev instead of a single dmfmxl-dev (Debian/Ubuntu)" OFF)
+set(MXL_DEB_RELEASE "1" CACHE STRING "Debian revision of the dmfmxl/dmfmxl-dev packages (MXL_DEB_COMPONENTS)")
+set(MXL_DEB_RUNTIME_DEPENDS "" CACHE STRING
+    "Depends of the dmfmxl runtime package (MXL_DEB_COMPONENTS), e.g. the libfabric package with MXL_ENABLE_FABRICS_OFI")
+
 set(CPACK_PACKAGE_NAME "dmfmxl-dev")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_DESCRIPTION "EBU DMF Media eXchange Layer SDK development package")
@@ -452,7 +458,9 @@ if(EXISTS "/etc/os-release")
 
     if(IS_DEBIAN)
         set(CPACK_GENERATOR "DEB")
-        set(CPACK_DEBIAN_PACKAGE_DEPENDS "gstreamer1.0-x, gstreamer1.0-plugins-good")
+        if(NOT MXL_DEB_COMPONENTS)
+            set(CPACK_DEBIAN_PACKAGE_DEPENDS "gstreamer1.0-x, gstreamer1.0-plugins-good")
+        endif()
         set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
         set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
 
@@ -468,7 +476,62 @@ if(EXISTS "/etc/os-release")
             message(FATAL_ERROR "dpkg not found — cannot determine Debian architecture")
         endif()
         set(CPACK_PACKAGE_ARCHITECTURE "${DEB_ARCH}")
-        set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}_${CPACK_PACKAGE_VERSION}~${MXL_BUILD_TYPE}+g${GIT_HASH}-1_${CPACK_PACKAGE_ARCHITECTURE}")
+
+        if(MXL_DEB_COMPONENTS)
+            # Production packaging: dmfmxl (runtime - shared libraries and
+            # tools) and dmfmxl-dev (headers, CMake/pkg-config files, .so
+            # links), which depends on the exact same dmfmxl version.
+            #
+            # Versioned <version>+<commit date>.g<hash> so packages built
+            # from different commits of the same release are different
+            # versions to apt.
+            set(MXL_DEB_VERSION "${PROJECT_VERSION}")
+            if(NOT GIT_HASH STREQUAL "unknown")
+                execute_process(
+                    COMMAND ${GIT_EXECUTABLE} log -1 --format=%cd --date=format:%Y%m%d
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE MXL_GIT_COMMIT_DATE
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                )
+                string(SUBSTRING "${GIT_HASH}" 0 8 MXL_GIT_SHORT_HASH)
+                string(APPEND MXL_DEB_VERSION "+${MXL_GIT_COMMIT_DATE}.g${MXL_GIT_SHORT_HASH}")
+            endif()
+            set(MXL_DEB_FULL_VERSION "${MXL_DEB_VERSION}-${MXL_DEB_RELEASE}")
+
+            set(CPACK_DEB_COMPONENT_INSTALL ON)
+            set(CPACK_COMPONENTS_ALL ${PROJECT_NAME}-lib ${PROJECT_NAME}-tools ${PROJECT_NAME}-dev)
+            set(CPACK_COMPONENTS_GROUPING ONE_PER_GROUP)
+            string(TOUPPER "${PROJECT_NAME}" _mxl_upper)
+            set(CPACK_COMPONENT_${_mxl_upper}-LIB_GROUP "runtime")
+            set(CPACK_COMPONENT_${_mxl_upper}-TOOLS_GROUP "runtime")
+            set(CPACK_COMPONENT_${_mxl_upper}-DEV_GROUP "development")
+
+            set(CPACK_DEBIAN_PACKAGE_VERSION "${MXL_DEB_VERSION}")
+            set(CPACK_DEBIAN_PACKAGE_RELEASE "${MXL_DEB_RELEASE}")
+            set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+
+            set(CPACK_DEBIAN_RUNTIME_PACKAGE_NAME "dmfmxl")
+            set(CPACK_DEBIAN_RUNTIME_PACKAGE_SECTION "libs")
+            set(CPACK_DEBIAN_RUNTIME_DESCRIPTION
+                "EBU DMF Media eXchange Layer runtime libraries and tools")
+            set(CPACK_DEBIAN_RUNTIME_PACKAGE_DEPENDS "${MXL_DEB_RUNTIME_DEPENDS}")
+            # shlibs file + ldconfig trigger - only packages with shared
+            # libraries (dmfmxl) get them.
+            set(CPACK_DEBIAN_PACKAGE_GENERATE_SHLIBS ON)
+            # Take the libraries over from a single-package dmfmxl-dev of
+            # any other version (which shipped them too).
+            set(CPACK_DEBIAN_RUNTIME_PACKAGE_REPLACES
+                "dmfmxl-dev (<< ${MXL_DEB_FULL_VERSION}), dmfmxl-dev (>> ${MXL_DEB_FULL_VERSION})")
+            set(CPACK_DEBIAN_RUNTIME_PACKAGE_BREAKS "${CPACK_DEBIAN_RUNTIME_PACKAGE_REPLACES}")
+
+            set(CPACK_DEBIAN_DEVELOPMENT_PACKAGE_NAME "dmfmxl-dev")
+            set(CPACK_DEBIAN_DEVELOPMENT_PACKAGE_SECTION "libdevel")
+            set(CPACK_DEBIAN_DEVELOPMENT_DESCRIPTION
+                "EBU DMF Media eXchange Layer SDK development package")
+            set(CPACK_DEBIAN_DEVELOPMENT_PACKAGE_DEPENDS "dmfmxl (= ${MXL_DEB_FULL_VERSION})")
+        else()
+            set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}_${CPACK_PACKAGE_VERSION}~${MXL_BUILD_TYPE}+g${GIT_HASH}-1_${CPACK_PACKAGE_ARCHITECTURE}")
+        endif()
 
     elseif(IS_RPM)
         set(CPACK_GENERATOR "RPM")

@@ -94,6 +94,8 @@ install(TARGETS mxl EXPORT ${PROJECT_NAME}-targets
         COMPONENT ${PROJECT_NAME}-lib
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            # The unversioned .so link is only for building against it.
+            NAMELINK_COMPONENT ${PROJECT_NAME}-dev
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 
